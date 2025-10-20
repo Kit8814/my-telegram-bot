@@ -667,7 +667,7 @@ def main():
     application.add_handler(CommandHandler("list_subjects", bot.list_subjects))
     application.add_handler(conv_handler)
     application.add_handler(CommandHandler("cancel", bot.cancel))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot.handle_text))
+    application.add_handler(MessageHandler(filters.TEXT & filters.Regex(r'^\d+$'), bot.handle_text))
     
     # Запускаем бота
     print("Бот запущен...")
