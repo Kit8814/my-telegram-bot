@@ -17,18 +17,19 @@ logging.basicConfig(
     WAITING_SUBJECT_NAME, 
     WAITING_TOPICS_LIST,
     WAITING_FOR_SUBJECT_TIME,
-    SETTING_DATE_TIME,
+    SETTING_DATE,
+    SETTING_TIME,
     CANCELING_REGISTRATION,
     SELECTING_SUBJECT_FOR_REMOVAL,
     SELECTING_TOPIC_FOR_REMOVAL
-) = range(7)
+) = range(8)
 
 class SeminarBot:
     def __init__(self):
-        self.topics = {}  # {subject: {number: topic}}
-        self.registrations = {}  # {subject: {number: (user_id, username, timestamp)}}
-        self.start_times = {}  # {subject: datetime}
-        self.admin_id = 1074399585  # ID администратора
+        self.topics = {}
+        self.registrations = {}
+        self.start_times = {}
+        self.admin_id = 1074399585
 
     def is_admin(self, user_id):
         return user_id == self.admin_id
@@ -106,14 +107,18 @@ class SeminarBot:
             start_time = self.start_times.get(subject_name)
             if start_time:
                 now = datetime.datetime.now()
-                time_left = start_time - now
-                days = time_left.days
-                
-                if days > 0:
-                    topics_text += f"\n📅 Начало: {start_time.strftime('%d.%m.%Y %H:%M')}"
-                    topics_text += f"\n⏰ До начала: {days} дней"
+                if now >= start_time:
+                    topics_text += f"\n✅ Распределение АКТИВНО"
                 else:
-                    topics_text += f"\n⏰ Начало: {start_time.strftime('%d.%m.%Y %H:%M')}"
+                    time_left = start_time - now
+                    days = time_left.days
+                    hours = time_left.seconds // 3600
+                    minutes = (time_left.seconds % 3600) // 60
+                    
+                    if days > 0:
+                        topics_text += f"\n⏰ Начнется через: {days} дн. {hours} ч. {minutes} м."
+                    else:
+                        topics_text += f"\n⏰ Начнется через: {hours} ч. {minutes} м."
             else:
                 topics_text += "\n⏰ Время не установлено (/set_subject_time)"
             
@@ -141,13 +146,13 @@ class SeminarBot:
             await update.message.reply_text("Нет добавленных предметов.")
             return ConversationHandler.END
         
-        subjects_text = "Доступные предметы:\n\n"
+        subjects_text = "📚 Выберите предмет:\n\n"
         for i, subject in enumerate(self.topics.keys(), 1):
             start_time = self.start_times.get(subject)
             time_info = f" - {start_time.strftime('%d.%m.%Y %H:%M')}" if start_time else " - время не установлено"
             subjects_text += f"{i}. {subject}{time_info}\n"
         
-        subjects_text += "\nВведите номер предмета или название:"
+        subjects_text += "\nВведите номер предмета:"
         await update.message.reply_text(subjects_text)
         
         return WAITING_FOR_SUBJECT_TIME
@@ -166,85 +171,146 @@ class SeminarBot:
                 subject = text
         
         if not subject:
-            await update.message.reply_text("Предмет не найден. Попробуйте еще раз.")
+            await update.message.reply_text("❌ Предмет не найден. Введите номер из списка:")
             return WAITING_FOR_SUBJECT_TIME
         
         context.user_data['selected_subject'] = subject
+        
         await update.message.reply_text(
-            f"Выбран предмет: {subject}\n\n"
-            "📅 Введите дату в формате ДД.ММ.ГГГГ (например, 25.12.2024):"
+            f"📖 Выбран предмет: {subject}\n\n"
+            "📅 Введите дату начала в формате ДД.ММ.ГГГГ\n"
+            "Например: 25.12.2024"
         )
-        return SETTING_DATE_TIME
+        return SETTING_DATE
 
-    async def handle_set_date_time(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def handle_set_date(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = update.message.text.strip()
         subject = context.user_data.get('selected_subject')
         
         if not subject:
-            await update.message.reply_text("Ошибка: предмет не выбран.")
+            await update.message.reply_text("❌ Ошибка: предмет не выбран.")
             return ConversationHandler.END
         
-        if 'selected_date' not in context.user_data:
-            date_pattern = r'^(\d{2})\.(\d{2})\.(\d{4})$'
-            match = re.match(date_pattern, text)
-            
-            if not match:
-                await update.message.reply_text("Неверный формат даты. Используйте ДД.ММ.ГГГГ:")
-                return SETTING_DATE_TIME
-            
-            day, month, year = map(int, match.groups())
-            
-            try:
-                selected_date = datetime.datetime(year, month, day)
-                now = datetime.datetime.now()
-                
-                if selected_date.date() < now.date():
-                    await update.message.reply_text("Нельзя установить дату в прошлом! Введите будущую дату:")
-                    return SETTING_DATE_TIME
-                
-                context.user_data['selected_date'] = selected_date
-                await update.message.reply_text(
-                    f"✅ Дата: {selected_date.strftime('%d.%m.%Y')}\n\n"
-                    "⏰ Введите время в формате ЧЧ:ММ (например, 14:30):"
-                )
-                return SETTING_DATE_TIME
-                
-            except ValueError:
-                await update.message.reply_text("Некорректная дата! Попробуйте еще раз:")
-                return SETTING_DATE_TIME
+        # Проверяем формат даты
+        date_pattern = r'^(\d{1,2})\.(\d{1,2})\.(\d{4})$'
+        match = re.match(date_pattern, text)
         
-        else:
-            time_pattern = r'^([0-1]?[0-9]|2[0-3]):([0-5][0-9])$'
-            if not re.match(time_pattern, text):
-                await update.message.reply_text("Неверный формат времени. Используйте ЧЧ:ММ:")
-                return SETTING_DATE_TIME
+        if not match:
+            await update.message.reply_text(
+                "❌ Неверный формат даты!\n"
+                "✅ Используйте: ДД.ММ.ГГГГ\n"
+                "Например: 25.12.2024\n"
+                "Попробуйте еще раз:"
+            )
+            return SETTING_DATE
+        
+        day, month, year = map(int, match.groups())
+        
+        try:
+            # Проверяем корректность даты
+            selected_date = datetime.date(year, month, day)
+            today = datetime.date.today()
             
-            selected_date = context.user_data['selected_date']
-            hours, minutes = map(int, text.split(':'))
+            if selected_date < today:
+                await update.message.reply_text(
+                    "❌ Нельзя установить дату в прошлом!\n"
+                    "✅ Введите будущую дату:\n"
+                    "Формат: ДД.ММ.ГГГГ"
+                )
+                return SETTING_DATE
             
-            start_time = selected_date.replace(hour=hours, minute=minutes, second=0, microsecond=0)
+            # Сохраняем дату
+            context.user_data['selected_date'] = selected_date
+            
+            await update.message.reply_text(
+                f"✅ Дата установлена: {selected_date.strftime('%d.%m.%Y')}\n\n"
+                "⏰ Теперь введите время начала в формате ЧЧ:ММ\n"
+                "Например: 14:30"
+            )
+            return SETTING_TIME
+            
+        except ValueError as e:
+            await update.message.reply_text(
+                f"❌ Некорректная дата: {str(e)}\n"
+                "✅ Проверьте:\n"
+                "- День от 1 до 31\n"
+                "- Месяц от 1 до 12\n"
+                "- Год от 2024\n"
+                "Попробуйте еще раз:"
+            )
+            return SETTING_DATE
+
+    async def handle_set_time(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        text = update.message.text.strip()
+        subject = context.user_data.get('selected_subject')
+        selected_date = context.user_data.get('selected_date')
+        
+        if not subject or not selected_date:
+            await update.message.reply_text("❌ Ошибка: данные не найдены.")
+            return ConversationHandler.END
+        
+        # Проверяем формат времени
+        time_pattern = r'^([0-1]?[0-9]|2[0-3]):([0-5][0-9])$'
+        match = re.match(time_pattern, text)
+        
+        if not match:
+            await update.message.reply_text(
+                "❌ Неверный формат времени!\n"
+                "✅ Используйте: ЧЧ:ММ\n"
+                "Например: 14:30\n"
+                "Попробуйте еще раз:"
+            )
+            return SETTING_TIME
+        
+        hours, minutes = map(int, match.groups())
+        
+        try:
+            # Создаем полную дату и время
+            start_time = datetime.datetime.combine(selected_date, datetime.time(hours, minutes))
             
             now = datetime.datetime.now()
             
+            # Проверяем, что установленное время в будущем
             if start_time <= now:
-                await update.message.reply_text("Нельзя установить время в прошлом! Введите будущее время:")
-                return SETTING_DATE_TIME
+                await update.message.reply_text(
+                    "❌ Нельзя установить время в прошлом!\n"
+                    "✅ Введите будущее время:\n"
+                    "Формат: ЧЧ:ММ"
+                )
+                return SETTING_TIME
             
+            # Устанавливаем время начала для предмета
             self.start_times[subject] = start_time
             
-            days_left = (start_time.date() - now.date()).days
+            # Рассчитываем сколько времени осталось
+            time_left = start_time - now
+            days = time_left.days
+            hours_left = time_left.seconds // 3600
+            minutes_left = (time_left.seconds % 3600) // 60
+            
+            time_info = ""
+            if days > 0:
+                time_info = f"{days} дней {hours_left} часов {minutes_left} минут"
+            else:
+                time_info = f"{hours_left} часов {minutes_left} минут"
             
             await update.message.reply_text(
                 f"✅ Дата и время установлены!\n\n"
                 f"📖 Предмет: {subject}\n"
                 f"📅 Дата: {start_time.strftime('%d.%m.%Y')}\n"
                 f"⏰ Время: {start_time.strftime('%H:%M')}\n"
-                f"📊 До начала: {days_left} дней"
+                f"⏳ До начала: {time_info}\n"
+                f"🔔 Напоминание за 5 минут до начала"
             )
             
+            # Очищаем временные данные
             context.user_data.pop('selected_subject', None)
             context.user_data.pop('selected_date', None)
-            return ConversationHandler.END
+            
+        except Exception as e:
+            await update.message.reply_text(f"❌ Ошибка: {str(e)}")
+        
+        return ConversationHandler.END
 
     async def send_topics_update(self, subject, update: Update = None):
         try:
@@ -261,24 +327,29 @@ class SeminarBot:
             start_time = self.start_times.get(subject)
             if start_time:
                 now = datetime.datetime.now()
-                if self.is_distribution_started(subject):
-                    topics_text += f"\n✅ Активно с {start_time.strftime('%H:%M')}"
+                if now >= start_time:
+                    topics_text += f"\n✅ Распределение АКТИВНО"
                 else:
                     time_left = start_time - now
                     days = time_left.days
-                    hours, remainder = divmod(time_left.seconds, 3600)
-                    minutes, seconds = divmod(remainder, 60)
+                    hours = time_left.seconds // 3600
+                    minutes = (time_left.seconds % 3600) // 60
                     
                     if days > 0:
-                        topics_text += f"\n⏰ До начала: {days} дн {int(hours)}ч {int(minutes)}м"
+                        topics_text += f"\n⏰ Начнется через: {days} дн. {hours} ч. {minutes} м."
                     else:
-                        topics_text += f"\n⏰ До начала: {int(hours)}ч {int(minutes)}м"
+                        topics_text += f"\n⏰ Начнется через: {hours} ч. {minutes} м."
             
             if update:
                 await update.message.reply_text(topics_text)
                 
         except Exception as e:
             logging.error(f"Ошибка при отправке тем: {e}")
+
+    # ... остальные методы (list_subjects, cancel_registration, handle_cancel_registration, remove_user, 
+    # handle_subject_selection_for_removal, handle_topic_selection_for_removal, cancel, 
+    # is_distribution_started, handle_topic_selection, view_topics, show_results) 
+    # остаются без изменений из предыдущего кода
 
     async def list_subjects(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.topics:
@@ -294,17 +365,17 @@ class SeminarBot:
                 now = datetime.datetime.now()
                 
                 if now >= start_time:
-                    status = "✅ Активно"
+                    status = "✅ АКТИВНО"
                 else:
                     time_left = start_time - now
                     days = time_left.days
-                    hours, remainder = divmod(time_left.seconds, 3600)
-                    minutes, seconds = divmod(remainder, 60)
+                    hours = time_left.seconds // 3600
+                    minutes = (time_left.seconds % 3600) // 60
                     
                     if days > 0:
-                        status = f"⏰ Через {days} дн"
+                        status = f"⏰ Через {days} дн. {hours} ч."
                     else:
-                        status = f"⏰ Через {int(hours)}ч {int(minutes)}м"
+                        status = f"⏰ Через {hours} ч. {minutes} м."
             else:
                 time_info = "не установлено"
                 status = "❌ Время не задано"
@@ -571,13 +642,9 @@ class SeminarBot:
                 await update.message.reply_text(results_text)
 
 def main():
-    # Используем переменную окружения или тестовый токен
     TOKEN = os.environ.get('BOT_TOKEN', "8405347117:AAG7h0qxePyQ9mXW3z03DBYOEWafOVP3oBI")
     
-    # Создаем приложение
     application = Application.builder().token(TOKEN).build()
-    
-    # Создаем экземпляр бота
     bot = SeminarBot()
     
     # ConversationHandler для добавления предметов
@@ -590,16 +657,24 @@ def main():
         fallbacks=[CommandHandler("cancel", bot.cancel)]
     )
     
+    # ConversationHandler для установки времени
+    time_handler = ConversationHandler(
+        entry_points=[CommandHandler("set_subject_time", bot.set_subject_time)],
+        states={
+            WAITING_FOR_SUBJECT_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot.handle_subject_selection)],
+            SETTING_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot.handle_set_date)],
+            SETTING_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot.handle_set_time)],
+        },
+        fallbacks=[CommandHandler("cancel", bot.cancel)]
+    )
+    
     # ConversationHandler для административных команд
     admin_handler = ConversationHandler(
         entry_points=[
-            CommandHandler("set_subject_time", bot.set_subject_time),
             CommandHandler("cancel_registration", bot.cancel_registration),
             CommandHandler("remove_user", bot.remove_user)
         ],
         states={
-            WAITING_FOR_SUBJECT_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot.handle_subject_selection)],
-            SETTING_DATE_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot.handle_set_date_time)],
             CANCELING_REGISTRATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot.handle_cancel_registration)],
             SELECTING_SUBJECT_FOR_REMOVAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot.handle_subject_selection_for_removal)],
             SELECTING_TOPIC_FOR_REMOVAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot.handle_topic_selection_for_removal)]
@@ -610,6 +685,7 @@ def main():
     # Добавляем обработчики
     application.add_handler(CommandHandler("start", bot.start))
     application.add_handler(new_subject_handler)
+    application.add_handler(time_handler)
     application.add_handler(CommandHandler("view_topics", bot.view_topics))
     application.add_handler(CommandHandler("results", bot.show_results))
     application.add_handler(CommandHandler("list_subjects", bot.list_subjects))
@@ -622,7 +698,6 @@ def main():
         bot.handle_topic_selection
     ))
     
-    # Запускаем бота
     print("Бот запущен...")
     application.run_polling()
 
