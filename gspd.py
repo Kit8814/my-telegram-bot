@@ -1,11 +1,10 @@
 import logging
 import os
-from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
+import asyncio
+from telegram import Update, ReplyKeyboardRemove
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters, ConversationHandler
-from collections import OrderedDict
 import datetime
 import re
-import asyncio
 
 # Настройка логирования
 logging.basicConfig(
@@ -14,29 +13,27 @@ logging.basicConfig(
 )
 
 # Константы для состояний ConversationHandler
-SETTING_DATE_TIME, CANCELING_REGISTRATION, WAITING_FOR_SUBJECT_TIME, SELECTING_SUBJECT_FOR_REMOVAL, SELECTING_TOPIC_FOR_REMOVAL = range(5)
+(
+    WAITING_SUBJECT_NAME, 
+    WAITING_TOPICS_LIST,
+    WAITING_FOR_SUBJECT_TIME,
+    SETTING_DATE_TIME,
+    CANCELING_REGISTRATION,
+    SELECTING_SUBJECT_FOR_REMOVAL,
+    SELECTING_TOPIC_FOR_REMOVAL
+) = range(7)
 
 class SeminarBot:
-    def __init__(self, application):
+    def __init__(self):
         self.topics = {}  # {subject: {number: topic}}
         self.registrations = {}  # {subject: {number: (user_id, username, timestamp)}}
-        self.start_times = {}  # {subject: datetime} - время начала для каждого предмета
-        self.current_subject = None
-        self.waiting_for_topics = False
-        self.admin_id = None  # ID администратора
-        self.distribution_tasks = {}  # {subject: task} - задачи для автоматического начала распределения
-        self.reminder_tasks = {}  # {subject: task} - задачи для напоминаний
-        self.application = application
-        
-        # Установите ID администратора здесь
-        self.admin_id = 1074399585   # Замените на реальный ID администратора
+        self.start_times = {}  # {subject: datetime}
+        self.admin_id = 1074399585  # ID администратора
 
     def is_admin(self, user_id):
-        """Проверяет, является ли пользователь администратором"""
         return user_id == self.admin_id
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Обработчик команды /start"""
         user = update.effective_user
         await update.message.reply_text(
             f"Привет, {user.first_name}! Я бот для распределения семинарских тем.\n\n"
@@ -44,25 +41,98 @@ class SeminarBot:
             "/new_subject - начать новое распределение тем\n"
             "/view_topics - посмотреть текущие темы\n"
             "/results - показать результаты распределения\n"
-            "/set_subject_time - установить дату и время начала для предмета (только для админа)\n"
-            "/cancel_registration - отменить выбор темы (только для админа)\n"
-            "/remove_user - удалить участника с темы (только для админа)\n"
-            "/list_subjects - показать все предметы и их время начала\n"
+            "/set_subject_time - установить дату и время начала (админ)\n"
+            "/cancel_registration - отменить выбор темы (админ)\n"
+            "/remove_user - удалить участника с темы (админ)\n"
+            "/list_subjects - показать все предметы\n"
             "/cancel - отменить текущую операцию"
         )
 
     async def new_subject(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Начать новое распределение тем"""
-        self.waiting_for_topics = True
-        self.current_subject = None
-        
         await update.message.reply_text(
-            "Введите название предмета для которого добавляете темы:",
+            "Введите название предмета:",
             reply_markup=ReplyKeyboardRemove()
         )
+        return WAITING_SUBJECT_NAME
+
+    async def handle_subject_name(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        subject_name = update.message.text.strip()
+        
+        if not subject_name:
+            await update.message.reply_text("Название предмета не может быть пустым. Попробуйте еще раз:")
+            return WAITING_SUBJECT_NAME
+        
+        context.user_data['current_subject'] = subject_name
+        
+        await update.message.reply_text(
+            f"Предмет '{subject_name}' установлен. Теперь отправьте список тем:\n"
+            "1. Тема 1\n"
+            "2. Тема 2\n"
+            "3. Тема 3\n"
+            "..."
+        )
+        return WAITING_TOPICS_LIST
+
+    async def handle_topics_list(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        text = update.message.text.strip()
+        subject_name = context.user_data.get('current_subject')
+        
+        if not subject_name:
+            await update.message.reply_text("Ошибка. Начните заново с /new_subject")
+            return ConversationHandler.END
+        
+        lines = text.split('\n')
+        topics_dict = {}
+        
+        for line in lines:
+            if '.' in line:
+                parts = line.split('.', 1)
+                try:
+                    number = int(parts[0].strip())
+                    topic = parts[1].strip()
+                    if topic:
+                        topics_dict[number] = topic
+                except (ValueError, IndexError):
+                    continue
+        
+        if topics_dict:
+            self.topics[subject_name] = topics_dict
+            self.registrations[subject_name] = {}
+            
+            topics_text = f"✅ Темы для '{subject_name}' добавлены!\n\n"
+            for num, topic in sorted(topics_dict.items()):
+                topics_text += f"{num}. {topic}\n"
+            
+            start_time = self.start_times.get(subject_name)
+            if start_time:
+                now = datetime.datetime.now()
+                time_left = start_time - now
+                days = time_left.days
+                
+                if days > 0:
+                    topics_text += f"\n📅 Начало: {start_time.strftime('%d.%m.%Y %H:%M')}"
+                    topics_text += f"\n⏰ До начала: {days} дней"
+                else:
+                    topics_text += f"\n⏰ Начало: {start_time.strftime('%d.%m.%Y %H:%M')}"
+            else:
+                topics_text += "\n⏰ Время не установлено (/set_subject_time)"
+            
+            topics_text += "\n\nЧтобы выбрать тему, отправьте номер."
+            
+            await update.message.reply_text(topics_text)
+            context.user_data.pop('current_subject', None)
+        else:
+            await update.message.reply_text(
+                "Не удалось распознать темы. Формат:\n"
+                "1. Тема 1\n"
+                "2. Тема 2\n"
+                "..."
+            )
+            return WAITING_TOPICS_LIST
+        
+        return ConversationHandler.END
 
     async def set_subject_time(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Установить дату и время начала для конкретного предмета (только для админа)"""
         if not self.is_admin(update.effective_user.id):
             await update.message.reply_text("Эта команда доступна только администратору.")
             return ConversationHandler.END
@@ -71,31 +141,27 @@ class SeminarBot:
             await update.message.reply_text("Нет добавленных предметов.")
             return ConversationHandler.END
         
-        # Показываем список предметов
         subjects_text = "Доступные предметы:\n\n"
         for i, subject in enumerate(self.topics.keys(), 1):
             start_time = self.start_times.get(subject)
-            time_info = f" - начало: {start_time.strftime('%d.%m.%Y %H:%M')}" if start_time else " - время не установлено"
+            time_info = f" - {start_time.strftime('%d.%m.%Y %H:%M')}" if start_time else " - время не установлено"
             subjects_text += f"{i}. {subject}{time_info}\n"
         
-        subjects_text += "\nВведите номер предмета или название для установки даты и времени:"
+        subjects_text += "\nВведите номер предмета или название:"
         await update.message.reply_text(subjects_text)
         
         return WAITING_FOR_SUBJECT_TIME
 
     async def handle_subject_selection(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Обработка выбора предмета для установки даты и времени"""
         text = update.message.text.strip()
         subject = None
         
-        # Пытаемся найти предмет по номеру
         try:
             subject_num = int(text)
             subjects = list(self.topics.keys())
             if 1 <= subject_num <= len(subjects):
                 subject = subjects[subject_num - 1]
         except ValueError:
-            # Ищем предмет по названию
             if text in self.topics:
                 subject = text
         
@@ -106,13 +172,11 @@ class SeminarBot:
         context.user_data['selected_subject'] = subject
         await update.message.reply_text(
             f"Выбран предмет: {subject}\n\n"
-            "Теперь установите дату и время начала распределения.\n\n"
             "📅 Введите дату в формате ДД.ММ.ГГГГ (например, 25.12.2024):"
         )
         return SETTING_DATE_TIME
 
     async def handle_set_date_time(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Обработка ввода даты и времени начала для предмета"""
         text = update.message.text.strip()
         subject = context.user_data.get('selected_subject')
         
@@ -120,184 +184,77 @@ class SeminarBot:
             await update.message.reply_text("Ошибка: предмет не выбран.")
             return ConversationHandler.END
         
-        # Если это первый шаг - ввод даты
         if 'selected_date' not in context.user_data:
-            # Проверяем формат даты
             date_pattern = r'^(\d{2})\.(\d{2})\.(\d{4})$'
             match = re.match(date_pattern, text)
             
             if not match:
-                await update.message.reply_text(
-                    "Неверный формат даты. Используйте ДД.ММ.ГГГГ (например, 25.12.2024)\n"
-                    "Попробуйте еще раз:"
-                )
+                await update.message.reply_text("Неверный формат даты. Используйте ДД.ММ.ГГГГ:")
                 return SETTING_DATE_TIME
             
             day, month, year = map(int, match.groups())
             
             try:
-                # Проверяем корректность даты
                 selected_date = datetime.datetime(year, month, day)
                 now = datetime.datetime.now()
                 
                 if selected_date.date() < now.date():
-                    await update.message.reply_text(
-                        "Нельзя установить дату в прошлом! Введите будущую дату:\n"
-                        "Формат: ДД.ММ.ГГГГ (например, 25.12.2024)"
-                    )
+                    await update.message.reply_text("Нельзя установить дату в прошлом! Введите будущую дату:")
                     return SETTING_DATE_TIME
                 
                 context.user_data['selected_date'] = selected_date
                 await update.message.reply_text(
-                    f"✅ Дата установлена: {selected_date.strftime('%d.%m.%Y')}\n\n"
-                    "⏰ Теперь введите время начала в формате ЧЧ:ММ (например, 14:30):"
+                    f"✅ Дата: {selected_date.strftime('%d.%m.%Y')}\n\n"
+                    "⏰ Введите время в формате ЧЧ:ММ (например, 14:30):"
                 )
                 return SETTING_DATE_TIME
                 
             except ValueError:
-                await update.message.reply_text(
-                    "Некорректная дата! Проверьте правильность ввода.\n"
-                    "Формат: ДД.ММ.ГГГГ (например, 25.12.2024)\n"
-                    "Попробуйте еще раз:"
-                )
+                await update.message.reply_text("Некорректная дата! Попробуйте еще раз:")
                 return SETTING_DATE_TIME
         
-        # Если это второй шаг - ввод времени
         else:
-            # Проверяем формат времени
             time_pattern = r'^([0-1]?[0-9]|2[0-3]):([0-5][0-9])$'
             if not re.match(time_pattern, text):
-                await update.message.reply_text(
-                    "Неверный формат времени. Используйте ЧЧ:ММ (например, 14:30)\n"
-                    "Попробуйте еще раз:"
-                )
+                await update.message.reply_text("Неверный формат времени. Используйте ЧЧ:ММ:")
                 return SETTING_DATE_TIME
             
-            # Получаем сохраненную дату и добавляем время
             selected_date = context.user_data['selected_date']
             hours, minutes = map(int, text.split(':'))
             
-            # Создаем полную дату и время
             start_time = selected_date.replace(hour=hours, minute=minutes, second=0, microsecond=0)
             
             now = datetime.datetime.now()
             
-            # Проверяем, что установленное время в будущем
             if start_time <= now:
-                await update.message.reply_text(
-                    "Нельзя установить время в прошлом! Введите будущее время:\n"
-                    "Формат: ЧЧ:ММ (например, 14:30)"
-                )
+                await update.message.reply_text("Нельзя установить время в прошлом! Введите будущее время:")
                 return SETTING_DATE_TIME
             
-            # Устанавливаем время начала для предмета
             self.start_times[subject] = start_time
             
-            # Запускаем задачу для автоматического начала распределения
-            await self.schedule_distribution_start(subject, start_time)
-            # Запускаем задачу для напоминания за 5 минут
-            await self.schedule_reminder(subject, start_time)
-            
-            # Рассчитываем сколько дней осталось
             days_left = (start_time.date() - now.date()).days
             
             await update.message.reply_text(
-                f"✅ Дата и время начала распределения установлены!\n\n"
+                f"✅ Дата и время установлены!\n\n"
                 f"📖 Предмет: {subject}\n"
                 f"📅 Дата: {start_time.strftime('%d.%m.%Y')}\n"
                 f"⏰ Время: {start_time.strftime('%H:%M')}\n"
-                f"📊 До начала: {days_left} дней\n"
-                f"🔔 Напоминание будет отправлено за 5 минут до начала."
+                f"📊 До начала: {days_left} дней"
             )
             
-            # Очищаем временные данные
             context.user_data.pop('selected_subject', None)
             context.user_data.pop('selected_date', None)
             return ConversationHandler.END
 
-    async def schedule_distribution_start(self, subject, start_time):
-        """Запускает задачу для автоматического начала распределения в указанное время"""
-        # Отменяем предыдущую задачу, если она существует
-        if subject in self.distribution_tasks:
-            self.distribution_tasks[subject].cancel()
-        
-        # Создаем новую задачу
-        async def start_distribution():
-            delay = (start_time - datetime.datetime.now()).total_seconds()
-            if delay > 0:
-                await asyncio.sleep(delay)
-                # Рассылаем уведомление о начале распределения
-                await self.notify_distribution_start(subject)
-        
-        task = asyncio.create_task(start_distribution())
-        self.distribution_tasks[subject] = task
-
-    async def schedule_reminder(self, subject, start_time):
-        """Запускает задачу для отправки напоминания за 5 минут до начала"""
-        # Отменяем предыдущую задачу, если она существует
-        if subject in self.reminder_tasks:
-            self.reminder_tasks[subject].cancel()
-        
-        reminder_time = start_time - datetime.timedelta(minutes=5)
-        now = datetime.datetime.now()
-        
-        # Если время напоминания уже прошло, не планируем его
-        if reminder_time < now:
-            return
-        
-        async def send_reminder():
-            delay = (reminder_time - datetime.datetime.now()).total_seconds()
-            if delay > 0:
-                await asyncio.sleep(delay)
-                await self.notify_reminder(subject)
-        
-        task = asyncio.create_task(send_reminder())
-        self.reminder_tasks[subject] = task
-
-    async def notify_reminder(self, subject):
-        """Рассылает напоминание о начале распределения за 5 минут"""
+    async def send_topics_update(self, subject, update: Update = None):
         try:
-            message_text = (
-                f"⏰ Напоминание!\n"
-                f"Распределение тем по предмету '{subject}' начнется через 5 минут!\n"
-                f"Приготовьтесь выбрать тему."
-            )
-            logging.info(f"НАПОМИНАНИЕ для предмета '{subject}': {message_text}")
-            
-        except Exception as e:
-            logging.error(f"Ошибка при отправке напоминания: {e}")
-
-    async def notify_distribution_start(self, subject):
-        """Рассылает уведомление о начале распределения тем"""
-        try:
-            logging.info(f"Распределение тем для предмета '{subject}' началось!")
-            
-            message_text = (
-                f"🎉 Распределение тем по предмету '{subject}' началось!\n\n"
-                f"Доступные темы:\n"
-            )
-            
-            for num, topic in self.topics[subject].items():
-                status = "✅ Занята" if subject in self.registrations and num in self.registrations[subject] else "❌ Свободна"
-                message_text += f"{num}. {topic} - {status}\n"
-            
-            message_text += "\nЧтобы выбрать тему, отправьте номер нужной темы."
-            
-            logging.info(f"Сообщение о начале распределения: {message_text}")
-            
-        except Exception as e:
-            logging.error(f"Ошибка при отправке уведомления: {e}")
-
-    async def send_topics_update(self, subject, update: Update = None, chat_id: int = None):
-        """Отправляет обновленный список тем после выбора"""
-        try:
-            topics_text = f"📊 Актуальный список тем по предмету '{subject}':\n\n"
+            topics_text = f"📊 Темы по предмету '{subject}':\n\n"
             
             for num, topic in self.topics[subject].items():
                 if subject in self.registrations and num in self.registrations[subject]:
                     user_id, username, timestamp = self.registrations[subject][num]
                     time_str = timestamp.strftime('%H:%M:%S')
-                    topics_text += f"{num}. {topic} - ✅ Занята @{username} (в {time_str})\n"
+                    topics_text += f"{num}. {topic} - ✅ @{username} ({time_str})\n"
                 else:
                     topics_text += f"{num}. {topic} - ❌ Свободна\n"
             
@@ -305,7 +262,7 @@ class SeminarBot:
             if start_time:
                 now = datetime.datetime.now()
                 if self.is_distribution_started(subject):
-                    topics_text += f"\n✅ Распределение активно с {start_time.strftime('%d.%m.%Y %H:%M')}"
+                    topics_text += f"\n✅ Активно с {start_time.strftime('%H:%M')}"
                 else:
                     time_left = start_time - now
                     days = time_left.days
@@ -317,22 +274,18 @@ class SeminarBot:
                     else:
                         topics_text += f"\n⏰ До начала: {int(hours)}ч {int(minutes)}м"
             
-            # Отправляем сообщение
             if update:
                 await update.message.reply_text(topics_text)
-            elif chat_id:
-                await self.application.bot.send_message(chat_id, topics_text)
                 
         except Exception as e:
-            logging.error(f"Ошибка при отправке обновления тем: {e}")
+            logging.error(f"Ошибка при отправке тем: {e}")
 
     async def list_subjects(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Показать все предметы и их время начала"""
         if not self.topics:
             await update.message.reply_text("Нет добавленных предметов.")
             return
         
-        subjects_text = "📚 Список предметов и время начала распределения:\n\n"
+        subjects_text = "📚 Список предметов:\n\n"
         
         for subject in self.topics.keys():
             start_time = self.start_times.get(subject)
@@ -341,7 +294,7 @@ class SeminarBot:
                 now = datetime.datetime.now()
                 
                 if now >= start_time:
-                    status = "✅ Распределение началось"
+                    status = "✅ Активно"
                 else:
                     time_left = start_time - now
                     days = time_left.days
@@ -349,9 +302,9 @@ class SeminarBot:
                     minutes, seconds = divmod(remainder, 60)
                     
                     if days > 0:
-                        status = f"⏰ До начала: {days} дн {int(hours)}ч {int(minutes)}м"
+                        status = f"⏰ Через {days} дн"
                     else:
-                        status = f"⏰ До начала: {int(hours)}ч {int(minutes)}м"
+                        status = f"⏰ Через {int(hours)}ч {int(minutes)}м"
             else:
                 time_info = "не установлено"
                 status = "❌ Время не задано"
@@ -367,7 +320,6 @@ class SeminarBot:
         await update.message.reply_text(subjects_text)
 
     async def cancel_registration(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Начать процесс отмены регистрации (только для админа)"""
         if not self.is_admin(update.effective_user.id):
             await update.message.reply_text("Эта команда доступна только администратору.")
             return ConversationHandler.END
@@ -376,7 +328,6 @@ class SeminarBot:
             await update.message.reply_text("Нет добавленных предметов.")
             return ConversationHandler.END
         
-        # Показываем список предметов
         subjects_text = "Выберите предмет:\n\n"
         for i, subject in enumerate(self.topics.keys(), 1):
             subjects_text += f"{i}. {subject}\n"
@@ -388,11 +339,9 @@ class SeminarBot:
         return CANCELING_REGISTRATION
 
     async def handle_cancel_registration(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Обработка отмены регистрации"""
         text = update.message.text.strip()
         
         if context.user_data.get('cancel_action') == 'select_subject':
-            # Выбор предмета
             try:
                 subject_num = int(text)
                 subjects = list(self.topics.keys())
@@ -401,14 +350,13 @@ class SeminarBot:
                     context.user_data['selected_subject'] = subject
                     context.user_data['cancel_action'] = 'select_topic'
                     
-                    # Показываем занятые темы для выбранного предмета
                     if subject in self.registrations and self.registrations[subject]:
                         occupied_text = f"Занятые темы для '{subject}':\n\n"
                         for topic_num, (user_id, username, timestamp) in self.registrations[subject].items():
                             topic_name = self.topics[subject][topic_num]
-                            occupied_text += f"{topic_num}. {topic_name} - @{username} ({timestamp.strftime('%H:%M:%S')})\n"
+                            occupied_text += f"{topic_num}. {topic_name} - @{username}\n"
                         
-                        occupied_text += "\nВведите номер темы для отмены регистрации:"
+                        occupied_text += "\nВведите номер темы для отмены:"
                         await update.message.reply_text(occupied_text)
                     else:
                         await update.message.reply_text(f"Для предмета '{subject}' нет занятых тем.")
@@ -417,44 +365,39 @@ class SeminarBot:
                     await update.message.reply_text("Неверный номер предмета.")
                     return CANCELING_REGISTRATION
             except ValueError:
-                await update.message.reply_text("Пожалуйста, введите номер предмета.")
+                await update.message.reply_text("Введите номер предмета.")
                 return CANCELING_REGISTRATION
         
         elif context.user_data.get('cancel_action') == 'select_topic':
-            # Выбор темы для отмены
             try:
                 topic_num = int(text)
                 subject = context.user_data.get('selected_subject')
                 
                 if subject not in self.registrations or topic_num not in self.registrations[subject]:
-                    await update.message.reply_text("Этот номер темы не занят или не существует.")
+                    await update.message.reply_text("Тема не занята или не существует.")
                     return CANCELING_REGISTRATION
                 
-                # Удаляем регистрацию
                 user_id, username, timestamp = self.registrations[subject].pop(topic_num)
                 topic_name = self.topics[subject][topic_num]
                 
                 await update.message.reply_text(
-                    f"Регистрация на тему {topic_num}. {topic_name} отменена.\n"
+                    f"Регистрация отменена:\n"
+                    f"Тема: {topic_num}. {topic_name}\n"
                     f"Предмет: {subject}\n"
                     f"Пользователь: @{username}"
                 )
                 
-                # Отправляем обновленный список тем
                 await self.send_topics_update(subject, update)
-                
-                # Очищаем временные данные
                 context.user_data.pop('selected_subject', None)
                 context.user_data.pop('cancel_action', None)
                 
             except ValueError:
-                await update.message.reply_text("Пожалуйста, введите номер темы (цифру).")
+                await update.message.reply_text("Введите номер темы.")
                 return CANCELING_REGISTRATION
         
         return ConversationHandler.END
 
     async def remove_user(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Начать процесс удаления пользователя с темы (только для админа)"""
         if not self.is_admin(update.effective_user.id):
             await update.message.reply_text("Эта команда доступна только администратору.")
             return ConversationHandler.END
@@ -463,8 +406,7 @@ class SeminarBot:
             await update.message.reply_text("Нет добавленных предметов.")
             return ConversationHandler.END
         
-        # Показываем список предметов
-        subjects_text = "Выберите предмет для удаления участника:\n\n"
+        subjects_text = "Выберите предмет:\n\n"
         for i, subject in enumerate(self.topics.keys(), 1):
             subjects_text += f"{i}. {subject}\n"
         
@@ -474,7 +416,6 @@ class SeminarBot:
         return SELECTING_SUBJECT_FOR_REMOVAL
 
     async def handle_subject_selection_for_removal(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Обработка выбора предмета для удаления пользователя"""
         text = update.message.text.strip()
         subject = None
         
@@ -488,19 +429,18 @@ class SeminarBot:
                 subject = text
         
         if not subject:
-            await update.message.reply_text("Предмет не найден. Попробуйте еще раз.")
+            await update.message.reply_text("Предмет не найден.")
             return SELECTING_SUBJECT_FOR_REMOVAL
         
         context.user_data['removal_subject'] = subject
         
-        # Показываем занятые темы для выбранного предмета
         if subject in self.registrations and self.registrations[subject]:
             occupied_text = f"Занятые темы для '{subject}':\n\n"
             for topic_num, (user_id, username, timestamp) in self.registrations[subject].items():
                 topic_name = self.topics[subject][topic_num]
-                occupied_text += f"{topic_num}. {topic_name} - @{username} ({timestamp.strftime('%H:%M:%S')})\n"
+                occupied_text += f"{topic_num}. {topic_name} - @{username}\n"
             
-            occupied_text += "\nВведите номер темы, с которой нужно удалить участника:"
+            occupied_text += "\nВведите номер темы для удаления:"
             await update.message.reply_text(occupied_text)
             return SELECTING_TOPIC_FOR_REMOVAL
         else:
@@ -509,7 +449,6 @@ class SeminarBot:
             return ConversationHandler.END
 
     async def handle_topic_selection_for_removal(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Обработка выбора темы для удаления пользователя"""
         text = update.message.text.strip()
         subject = context.user_data.get('removal_subject')
         
@@ -521,39 +460,32 @@ class SeminarBot:
             topic_num = int(text)
             
             if subject not in self.registrations or topic_num not in self.registrations[subject]:
-                await update.message.reply_text("Этот номер темы не занят или не существует.")
+                await update.message.reply_text("Тема не занята или не существует.")
                 return SELECTING_TOPIC_FOR_REMOVAL
             
-            # Удаляем регистрацию
             user_id, username, timestamp = self.registrations[subject].pop(topic_num)
             topic_name = self.topics[subject][topic_num]
             
             await update.message.reply_text(
-                f"Участник @{username} удален с темы {topic_num}. {topic_name}.\n"
+                f"Участник удален:\n"
+                f"Тема: {topic_num}. {topic_name}\n"
                 f"Предмет: {subject}\n"
-                f"Тема теперь свободна для выбора."
+                f"Пользователь: @{username}"
             )
             
-            # Отправляем обновленный список тем
             await self.send_topics_update(subject, update)
             
         except ValueError:
-            await update.message.reply_text("Пожалуйста, введите номер темы (цифру).")
+            await update.message.reply_text("Введите номер темы.")
             return SELECTING_TOPIC_FOR_REMOVAL
         finally:
-            # Очищаем временные данные
             context.user_data.pop('removal_subject', None)
         
         return ConversationHandler.END
 
     async def cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Отмена текущей операции"""
-        self.waiting_for_topics = False
-        # Очищаем временные данные
-        context.user_data.pop('selected_subject', None)
-        context.user_data.pop('cancel_action', None)
-        context.user_data.pop('removal_subject', None)
-        context.user_data.pop('selected_date', None)
+        for key in ['current_subject', 'selected_subject', 'cancel_action', 'removal_subject', 'selected_date']:
+            context.user_data.pop(key, None)
         
         await update.message.reply_text(
             "Операция отменена.",
@@ -562,92 +494,17 @@ class SeminarBot:
         return ConversationHandler.END
 
     def is_distribution_started(self, subject):
-        """Проверяет, началось ли распределение тем для указанного предмета"""
         if subject not in self.start_times:
-            return True  # Если время не установлено, разрешаем сразу
-        
+            return True
         now = datetime.datetime.now()
         return now >= self.start_times[subject]
 
-    async def handle_text_input(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Обработка текстового ввода (названия предметов и списков тем)"""
-        text = update.message.text.strip()
-        
-        # Если ожидаем ввод названия предмета
-        if self.waiting_for_topics and not self.current_subject:
-            self.current_subject = text
-            self.topics[self.current_subject] = {}
-            self.registrations[self.current_subject] = {}
-            self.waiting_for_topics = False
-            
-            await update.message.reply_text(
-                f"Предмет '{text}' установлен. Теперь отправьте список тем в формате:\n"
-                "1. Тема 1\n"
-                "2. Тема 2\n"
-                "3. Тема 3\n"
-                "..."
-            )
-            return
-
-        # Если ожидаем список тем
-        elif self.current_subject and not self.topics[self.current_subject]:
-            lines = text.split('\n')
-            topics_dict = {}
-            
-            for line in lines:
-                if '.' in line:
-                    parts = line.split('.', 1)
-                    try:
-                        number = int(parts[0].strip())
-                        topic = parts[1].strip()
-                        topics_dict[number] = topic
-                    except (ValueError, IndexError):
-                        continue
-            
-            if topics_dict:
-                self.topics[self.current_subject] = topics_dict
-                
-                # Формируем сообщение с темами
-                topics_text = f"Темы для предмета '{self.current_subject}':\n\n"
-                for num, topic in topics_dict.items():
-                    topics_text += f"{num}. {topic}\n"
-                
-                start_time = self.start_times.get(self.current_subject)
-                if start_time:
-                    now = datetime.datetime.now()
-                    time_left = start_time - now
-                    days = time_left.days
-                    
-                    if days > 0:
-                        topics_text += f"\n📅 Распределение начнется: {start_time.strftime('%d.%m.%Y %H:%M')}"
-                        topics_text += f"\n⏰ До начала: {days} дней"
-                    else:
-                        topics_text += f"\n⏰ Распределение начнется: {start_time.strftime('%d.%m.%Y %H:%M')}"
-                else:
-                    topics_text += "\n⏰ Время начала распределения не установлено"
-                
-                topics_text += "\n\nЧтобы выбрать тему, отправьте номер нужной темы."
-                
-                await update.message.reply_text(topics_text)
-                
-                # Сбрасываем текущий предмет после добавления тем
-                self.current_subject = None
-            else:
-                await update.message.reply_text("Не удалось распознать темы. Попробуйте еще раз.")
-            return
-
-        # Если это не ввод предмета и не список тем - игнорируем
-        return
-
     async def handle_topic_selection(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Обработка выбора темы по номеру"""
         text = update.message.text.strip()
         user_id = update.effective_user.id
         username = update.effective_user.username or update.effective_user.first_name
 
-        # Обработка выбора темы (пользователь отправляет номер темы)
         if text.isdigit():
-            # Ищем предмет, для которого доступно распределение
             selected_subject = None
             for subject in self.topics.keys():
                 if self.is_distribution_started(subject):
@@ -655,7 +512,7 @@ class SeminarBot:
                     break
             
             if not selected_subject:
-                await update.message.reply_text("В настоящее время нет активных распределений тем.")
+                await update.message.reply_text("Нет активных распределений.")
                 return
             
             try:
@@ -663,78 +520,78 @@ class SeminarBot:
                 topics = self.topics[selected_subject]
                 
                 if topic_number not in topics:
-                    await update.message.reply_text("Такого номера темы не существует.")
+                    await update.message.reply_text("Такой темы не существует.")
                     return
                 
-                # Проверяем, не занята ли уже тема
                 if selected_subject in self.registrations and topic_number in self.registrations[selected_subject]:
                     await update.message.reply_text("Эта тема уже занята!")
                     return
                 
-                # Записываем выбор пользователя
                 timestamp = datetime.datetime.now()
                 if selected_subject not in self.registrations:
                     self.registrations[selected_subject] = {}
                 self.registrations[selected_subject][topic_number] = (user_id, username, timestamp)
                 
-                # Отправляем подтверждение выбора
                 await update.message.reply_text(
-                    f"🎉 Вы успешно выбрали тему!\n"
-                    f"📖 Тема: {topic_number}. {topics[topic_number]}\n"
-                    f"📚 Предмет: {selected_subject}\n"
-                    f"⏰ Время выбора: {timestamp.strftime('%H:%M:%S')}"
+                    f"🎉 Тема выбрана!\n"
+                    f"📖 {topic_number}. {topics[topic_number]}\n"
+                    f"📚 {selected_subject}\n"
+                    f"⏰ {timestamp.strftime('%H:%M:%S')}"
                 )
                 
-                # Отправляем обновленный список всех тем
                 await self.send_topics_update(selected_subject, update)
                 
             except ValueError:
-                await update.message.reply_text("Пожалуйста, отправьте номер темы (цифру).")
+                await update.message.reply_text("Введите номер темы.")
 
     async def view_topics(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Показать текущие темы для всех предметов"""
         if not self.topics:
             await update.message.reply_text("Темы еще не добавлены.")
             return
         
-        for subject, topics_dict in self.topics.items():
+        for subject in self.topics.keys():
             await self.send_topics_update(subject, update)
 
     async def show_results(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Показать результаты распределения для всех предметов"""
         if not any(self.registrations.values()):
             await update.message.reply_text("Еще никто не выбрал темы.")
             return
         
         for subject, registrations in self.registrations.items():
             if registrations:
-                # Сортируем по времени выбора
-                sorted_registrations = sorted(
-                    registrations.items(),
-                    key=lambda x: x[1][2]  # сортировка по timestamp
-                )
+                sorted_registrations = sorted(registrations.items(), key=lambda x: x[1][2])
                 
-                results_text = f"📊 Итоговые результаты по предмету '{subject}':\n\n"
+                results_text = f"📊 Результаты по '{subject}':\n\n"
                 
                 for topic_num, (user_id, username, timestamp) in sorted_registrations:
                     topic_name = self.topics[subject][topic_num]
                     time_str = timestamp.strftime('%H:%M:%S')
-                    results_text += f"{topic_num}. {topic_name}\n   👤 @{username} (в {time_str})\n\n"
+                    results_text += f"{topic_num}. {topic_name}\n   👤 @{username} ({time_str})\n\n"
                 
                 await update.message.reply_text(results_text)
 
 def main():
-    """Запуск бота"""
+    # Используем переменную окружения или тестовый токен
     TOKEN = os.environ.get('BOT_TOKEN', "8405347117:AAG7h0qxePyQ9mXW3z03DBYOEWafOVP3oBI")
     
     # Создаем приложение
     application = Application.builder().token(TOKEN).build()
     
-    # Создаем экземпляр бота с передачей application
-    bot = SeminarBot(application)
+    # Создаем экземпляр бота
+    bot = SeminarBot()
     
-    # Создаем ConversationHandler для административных команд
-    conv_handler = ConversationHandler(
+    # ConversationHandler для добавления предметов
+    new_subject_handler = ConversationHandler(
+        entry_points=[CommandHandler("new_subject", bot.new_subject)],
+        states={
+            WAITING_SUBJECT_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot.handle_subject_name)],
+            WAITING_TOPICS_LIST: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot.handle_topics_list)],
+        },
+        fallbacks=[CommandHandler("cancel", bot.cancel)]
+    )
+    
+    # ConversationHandler для административных команд
+    admin_handler = ConversationHandler(
         entry_points=[
             CommandHandler("set_subject_time", bot.set_subject_time),
             CommandHandler("cancel_registration", bot.cancel_registration),
@@ -752,18 +609,14 @@ def main():
     
     # Добавляем обработчики
     application.add_handler(CommandHandler("start", bot.start))
-    application.add_handler(CommandHandler("new_subject", bot.new_subject))
+    application.add_handler(new_subject_handler)
     application.add_handler(CommandHandler("view_topics", bot.view_topics))
     application.add_handler(CommandHandler("results", bot.show_results))
     application.add_handler(CommandHandler("list_subjects", bot.list_subjects))
-    application.add_handler(conv_handler)
+    application.add_handler(admin_handler)
     application.add_handler(CommandHandler("cancel", bot.cancel))
     
-    # Раздельные обработчики для текстовых сообщений
-    application.add_handler(MessageHandler(
-        filters.TEXT & ~filters.COMMAND & ~filters.Regex(r'^\d+$'), 
-        bot.handle_text_input
-    ))
+    # Обработчик для выбора тем
     application.add_handler(MessageHandler(
         filters.TEXT & filters.Regex(r'^\d+$'), 
         bot.handle_topic_selection
