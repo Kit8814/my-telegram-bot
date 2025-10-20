@@ -1,4 +1,5 @@
 import logging
+import os
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters, ConversationHandler
 from collections import OrderedDict
@@ -365,8 +366,6 @@ class SeminarBot:
         
         await update.message.reply_text(subjects_text)
 
-    # ... (остальные методы класса остаются без изменений: cancel_registration, handle_cancel_registration, remove_user, handle_subject_selection_for_removal, handle_topic_selection_for_removal, cancel, is_distribution_started, handle_text, view_topics, show_results)
-
     async def cancel_registration(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Начать процесс отмены регистрации (только для админа)"""
         if not self.is_admin(update.effective_user.id):
@@ -570,12 +569,10 @@ class SeminarBot:
         now = datetime.datetime.now()
         return now >= self.start_times[subject]
 
-    async def handle_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Обработка текстовых сообщений"""
+    async def handle_text_input(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработка текстового ввода (названия предметов и списков тем)"""
         text = update.message.text.strip()
-        user_id = update.effective_user.id
-        username = update.effective_user.username or update.effective_user.first_name
-
+        
         # Если ожидаем ввод названия предмета
         if self.waiting_for_topics and not self.current_subject:
             self.current_subject = text
@@ -638,6 +635,15 @@ class SeminarBot:
             else:
                 await update.message.reply_text("Не удалось распознать темы. Попробуйте еще раз.")
             return
+
+        # Если это не ввод предмета и не список тем - игнорируем
+        return
+
+    async def handle_topic_selection(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработка выбора темы по номеру"""
+        text = update.message.text.strip()
+        user_id = update.effective_user.id
+        username = update.effective_user.username or update.effective_user.first_name
 
         # Обработка выбора темы (пользователь отправляет номер темы)
         if text.isdigit():
@@ -719,7 +725,7 @@ class SeminarBot:
 
 def main():
     """Запуск бота"""
-    TOKEN = "8405347117:AAG7h0qxePyQ9mXW3z03DBYOEWafOVP3oBI"
+    TOKEN = os.environ.get('BOT_TOKEN', "8405347117:AAG7h0qxePyQ9mXW3z03DBYOEWafOVP3oBI")
     
     # Создаем приложение
     application = Application.builder().token(TOKEN).build()
@@ -752,7 +758,16 @@ def main():
     application.add_handler(CommandHandler("list_subjects", bot.list_subjects))
     application.add_handler(conv_handler)
     application.add_handler(CommandHandler("cancel", bot.cancel))
-    application.add_handler(MessageHandler(filters.TEXT & filters.Regex(r'^\d+$'), bot.handle_text))
+    
+    # Раздельные обработчики для текстовых сообщений
+    application.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND & ~filters.Regex(r'^\d+$'), 
+        bot.handle_text_input
+    ))
+    application.add_handler(MessageHandler(
+        filters.TEXT & filters.Regex(r'^\d+$'), 
+        bot.handle_topic_selection
+    ))
     
     # Запускаем бота
     print("Бот запущен...")
