@@ -34,6 +34,26 @@ class SeminarBot:
     def is_admin(self, user_id):
         return user_id == self.admin_id
 
+    def get_local_time(self):
+        """Получаем текущее время с учетом часового пояса Москвы (UTC+3)"""
+        utc_now = datetime.datetime.utcnow()
+        msk_offset = datetime.timedelta(hours=3)
+        return utc_now + msk_offset
+
+    def format_time_left(self, time_left):
+        """Форматирует оставшееся время в читаемый вид"""
+        days = time_left.days
+        total_seconds = int(time_left.total_seconds())
+        hours = (total_seconds // 3600) % 24
+        minutes = (total_seconds // 60) % 60
+        
+        if days > 0:
+            return f"{days} дн. {hours} ч. {minutes} м."
+        elif hours > 0:
+            return f"{hours} ч. {minutes} м."
+        else:
+            return f"{minutes} м."
+
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
         await update.message.reply_text(
@@ -106,19 +126,13 @@ class SeminarBot:
             
             start_time = self.start_times.get(subject_name)
             if start_time:
-                now = datetime.datetime.now()
+                now = self.get_local_time()
                 if now >= start_time:
                     topics_text += f"\n✅ Распределение АКТИВНО"
                 else:
                     time_left = start_time - now
-                    days = time_left.days
-                    hours = time_left.seconds // 3600
-                    minutes = (time_left.seconds % 3600) // 60
-                    
-                    if days > 0:
-                        topics_text += f"\n⏰ Начнется через: {days} дн. {hours} ч. {minutes} м."
-                    else:
-                        topics_text += f"\n⏰ Начнется через: {hours} ч. {minutes} м."
+                    time_info = self.format_time_left(time_left)
+                    topics_text += f"\n⏰ Начнется через: {time_info}"
             else:
                 topics_text += "\n⏰ Время не установлено (/set_subject_time)"
             
@@ -207,11 +221,13 @@ class SeminarBot:
         day, month, year = map(int, match.groups())
         
         try:
-            # Проверяем корректность даты
-            selected_date = datetime.date(year, month, day)
-            today = datetime.date.today()
+            # Создаем дату в московском часовом поясе
+            selected_date = datetime.datetime(year, month, day)
             
-            if selected_date < today:
+            # Получаем текущее время в MSK
+            now_msk = self.get_local_time()
+            
+            if selected_date.date() < now_msk.date():
                 await update.message.reply_text(
                     "❌ Нельзя установить дату в прошлом!\n"
                     "✅ Введите будущую дату:\n"
@@ -231,7 +247,7 @@ class SeminarBot:
             
         except ValueError as e:
             await update.message.reply_text(
-                f"❌ Некорректная дата: {str(e)}\n"
+                f"❌ Некорректная дата!\n"
                 "✅ Проверьте:\n"
                 "- День от 1 до 31\n"
                 "- Месяц от 1 до 12\n"
@@ -265,13 +281,14 @@ class SeminarBot:
         hours, minutes = map(int, match.groups())
         
         try:
-            # Создаем полную дату и время
+            # Создаем полную дату и время в MSK
             start_time = datetime.datetime.combine(selected_date, datetime.time(hours, minutes))
             
-            now = datetime.datetime.now()
+            # Получаем текущее время в MSK
+            now_msk = self.get_local_time()
             
             # Проверяем, что установленное время в будущем
-            if start_time <= now:
+            if start_time <= now_msk:
                 await update.message.reply_text(
                     "❌ Нельзя установить время в прошлом!\n"
                     "✅ Введите будущее время:\n"
@@ -283,16 +300,8 @@ class SeminarBot:
             self.start_times[subject] = start_time
             
             # Рассчитываем сколько времени осталось
-            time_left = start_time - now
-            days = time_left.days
-            hours_left = time_left.seconds // 3600
-            minutes_left = (time_left.seconds % 3600) // 60
-            
-            time_info = ""
-            if days > 0:
-                time_info = f"{days} дней {hours_left} часов {minutes_left} минут"
-            else:
-                time_info = f"{hours_left} часов {minutes_left} минут"
+            time_left = start_time - now_msk
+            time_info = self.format_time_left(time_left)
             
             await update.message.reply_text(
                 f"✅ Дата и время установлены!\n\n"
@@ -326,30 +335,19 @@ class SeminarBot:
             
             start_time = self.start_times.get(subject)
             if start_time:
-                now = datetime.datetime.now()
+                now = self.get_local_time()
                 if now >= start_time:
                     topics_text += f"\n✅ Распределение АКТИВНО"
                 else:
                     time_left = start_time - now
-                    days = time_left.days
-                    hours = time_left.seconds // 3600
-                    minutes = (time_left.seconds % 3600) // 60
-                    
-                    if days > 0:
-                        topics_text += f"\n⏰ Начнется через: {days} дн. {hours} ч. {minutes} м."
-                    else:
-                        topics_text += f"\n⏰ Начнется через: {hours} ч. {minutes} м."
+                    time_info = self.format_time_left(time_left)
+                    topics_text += f"\n⏰ Начнется через: {time_info}"
             
             if update:
                 await update.message.reply_text(topics_text)
                 
         except Exception as e:
             logging.error(f"Ошибка при отправке тем: {e}")
-
-    # ... остальные методы (list_subjects, cancel_registration, handle_cancel_registration, remove_user, 
-    # handle_subject_selection_for_removal, handle_topic_selection_for_removal, cancel, 
-    # is_distribution_started, handle_topic_selection, view_topics, show_results) 
-    # остаются без изменений из предыдущего кода
 
     async def list_subjects(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.topics:
@@ -362,20 +360,14 @@ class SeminarBot:
             start_time = self.start_times.get(subject)
             if start_time:
                 time_info = start_time.strftime('%d.%m.%Y %H:%M')
-                now = datetime.datetime.now()
+                now = self.get_local_time()
                 
                 if now >= start_time:
                     status = "✅ АКТИВНО"
                 else:
                     time_left = start_time - now
-                    days = time_left.days
-                    hours = time_left.seconds // 3600
-                    minutes = (time_left.seconds % 3600) // 60
-                    
-                    if days > 0:
-                        status = f"⏰ Через {days} дн. {hours} ч."
-                    else:
-                        status = f"⏰ Через {hours} ч. {minutes} м."
+                    time_info_status = self.format_time_left(time_left)
+                    status = f"⏰ Через {time_info_status}"
             else:
                 time_info = "не установлено"
                 status = "❌ Время не задано"
@@ -389,6 +381,8 @@ class SeminarBot:
             subjects_text += f"   🚦 Статус: {status}\n\n"
         
         await update.message.reply_text(subjects_text)
+
+    # ... остальные методы остаются без изменений
 
     async def cancel_registration(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.is_admin(update.effective_user.id):
@@ -567,7 +561,7 @@ class SeminarBot:
     def is_distribution_started(self, subject):
         if subject not in self.start_times:
             return True
-        now = datetime.datetime.now()
+        now = self.get_local_time()
         return now >= self.start_times[subject]
 
     async def handle_topic_selection(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -598,7 +592,7 @@ class SeminarBot:
                     await update.message.reply_text("Эта тема уже занята!")
                     return
                 
-                timestamp = datetime.datetime.now()
+                timestamp = self.get_local_time()
                 if selected_subject not in self.registrations:
                     self.registrations[selected_subject] = {}
                 self.registrations[selected_subject][topic_number] = (user_id, username, timestamp)
